@@ -17,12 +17,13 @@ const searchPingInterval = 5
 var searchHandler = withUser(func(w http.ResponseWriter, r *http.Request, d *data) (int, error) {
 	response := make(chan map[string]interface{})
 	ctx, cancel := context.WithCancelCause(r.Context())
+	defer cancel(nil)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		// Avoid connection timeout
-		timeout := time.NewTimer(searchPingInterval * time.Second)
+		timeout := time.NewTicker(searchPingInterval * time.Second)
 		defer timeout.Stop()
 		for {
 			var err error

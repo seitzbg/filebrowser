@@ -79,18 +79,68 @@ func (st usersBackend) Update(user *users.User, fields ...string) error {
 		return st.Save(user)
 	}
 
+	tx, err := st.db.Begin(true)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
 	for _, field := range fields {
 		userField := reflect.ValueOf(user).Elem().FieldByName(field)
 		if !userField.IsValid() {
 			return fmt.Errorf("invalid field: %s", field)
 		}
 		val := userField.Interface()
-		if err := st.db.UpdateField(user, field, val); err != nil {
+		if err := tx.UpdateField(user, field, val); err != nil {
 			return err
 		}
 	}
 
-	return nil
+	return tx.Commit()
+}
+
+func (st usersBackend) Import(list []*users.User, replace, overwrite bool) error {
+	tx, err := st.db.Begin(true)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var existing []*users.User
+	if err := tx.All(&existing); err != nil && !errors.Is(err, storm.ErrNotFound) {
+		return err
+	}
+	if replace {
+		for _, user := range existing {
+			if err := tx.DeleteStruct(user); err != nil {
+				return err
+			}
+		}
+	}
+	for _, user := range list {
+		var old users.User
+		err := tx.One("ID", user.ID, &old)
+		if err == nil && !overwrite {
+			return fmt.Errorf("user %d is already registered", user.ID)
+		}
+		if err != nil && !errors.Is(err, storm.ErrNotFound) {
+			return err
+		}
+		if !replace && errors.Is(err, storm.ErrNotFound) {
+			user.ID = 0
+		}
+		if err := tx.Save(user); err != nil {
+			return err
+		}
+	}
+	var result []*users.User
+	if err := tx.All(&result); err != nil && !errors.Is(err, storm.ErrNotFound) {
+		return err
+	}
+	for _, user := range result {
+		if user.Perm.Admin {
+			return tx.Commit()
+		}
+	}
+	return fberrors.ErrRootUserDeletion
 }
 
 func (st usersBackend) Save(user *users.User) error {

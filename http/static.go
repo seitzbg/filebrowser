@@ -2,6 +2,8 @@ package fbhttp
 
 import (
 	"compress/gzip"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -51,6 +54,7 @@ func handleWithStaticData(w http.ResponseWriter, _ *http.Request, d *data, fSys 
 		"TusSettings":           d.settings.Tus,
 		"HideLoginButton":       d.settings.HideLoginButton,
 	}
+	captchaFrameSource := ""
 
 	if d.settings.Branding.Files != "" {
 		fPath := filepath.Join(d.settings.Branding.Files, "custom.css")
@@ -77,6 +81,9 @@ func handleWithStaticData(w http.ResponseWriter, _ *http.Request, d *data, fSys 
 			data["ReCaptcha"] = auther.ReCaptcha.Key != "" && auther.ReCaptcha.Secret != ""
 			data["ReCaptchaHost"] = auther.ReCaptcha.Host
 			data["ReCaptchaKey"] = auther.ReCaptcha.Key
+			if host, err := url.Parse(auther.ReCaptcha.Host); err == nil && (host.Scheme == "https" || host.Scheme == "http") && host.Host != "" {
+				captchaFrameSource = " " + host.Scheme + "://" + host.Host
+			}
 		}
 	}
 
@@ -94,7 +101,23 @@ func handleWithStaticData(w http.ResponseWriter, _ *http.Request, d *data, fSys 
 		}
 		return http.StatusInternalServerError, err
 	}
-	index := template.Must(template.New("index").Delims("[{[", "]}]").Parse(string(fileContents)))
+	// Add a fresh nonce to every script in the trusted build template,
+	// including Vite's generated legacy bootstrap scripts.
+	var nonceBytes [24]byte
+	if _, err := rand.Read(nonceBytes[:]); err != nil {
+		return http.StatusInternalServerError, err
+	}
+	nonce := base64.StdEncoding.EncodeToString(nonceBytes[:])
+	data["Nonce"] = nonce
+	if strings.HasPrefix(contentType, "text/html") {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'nonce-"+nonce+"' 'strict-dynamic'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; media-src 'self' blob:; connect-src 'self' https: wss:; worker-src 'self' blob:; frame-src 'self' blob: https://www.google.com https://recaptcha.google.com https://www.recaptcha.net"+captchaFrameSource+"; manifest-src 'self' blob:; frame-ancestors 'self'; base-uri 'self'; object-src 'none'")
+	}
+	contents := strings.ReplaceAll(string(fileContents), "<script", `<script nonce="[{[ .Nonce ]}]"`)
+	index, err := template.New("index").Delims("[{[", "]}]").Parse(contents)
+	if err != nil {
+		return http.StatusInternalServerError, err
+	}
 	err = index.Execute(w, data)
 	if err != nil {
 		return http.StatusInternalServerError, err

@@ -26,6 +26,8 @@ var ErrImageTooLarge = errors.New("image too large for thumbnail generation")
 const (
 	MaxImageWidth  = 10000
 	MaxImageHeight = 10000
+	MaxImagePixels = 20_000_000
+	MaxImageBytes  = 32 << 20
 )
 
 // Service
@@ -150,7 +152,7 @@ func (s *Service) Resize(ctx context.Context, in io.Reader, width, height int, o
 	}
 	defer s.sem.Release(1)
 
-	format, wrappedReader, err := s.detectFormat(in)
+	format, wrappedReader, err := s.detectFormat(io.LimitReader(in, MaxImageBytes))
 	if err != nil {
 		return err
 	}
@@ -194,7 +196,7 @@ func (s *Service) Resize(ctx context.Context, in io.Reader, width, height int, o
 
 func (s *Service) detectFormat(in io.Reader) (Format, io.Reader, error) {
 	buf := &bytes.Buffer{}
-	r := io.TeeReader(in, buf)
+	r := io.TeeReader(io.LimitReader(in, 1<<20), buf)
 
 	imgConfig, imgFormat, err := image.DecodeConfig(r)
 	if err != nil {
@@ -202,7 +204,7 @@ func (s *Service) detectFormat(in io.Reader) (Format, io.Reader, error) {
 	}
 
 	// Check if image dimensions exceed maximum allowed size
-	if imgConfig.Width > MaxImageWidth || imgConfig.Height > MaxImageHeight {
+	if imgConfig.Width <= 0 || imgConfig.Height <= 0 || imgConfig.Width > MaxImageWidth || imgConfig.Height > MaxImageHeight || int64(imgConfig.Width)*int64(imgConfig.Height) > MaxImagePixels {
 		return 0, nil, fmt.Errorf("image dimensions %dx%d exceed maximum %dx%d: %w",
 			imgConfig.Width, imgConfig.Height, MaxImageWidth, MaxImageHeight, ErrImageTooLarge)
 	}

@@ -1,6 +1,7 @@
 package fbhttp
 
 import (
+	"github.com/filebrowser/filebrowser/v2/files"
 	"log"
 	"net/http"
 	gopath "path"
@@ -46,7 +47,20 @@ func (d *data) Check(path string) bool {
 // Check, it ignores HideDotfiles: hiding dotfiles is a display preference, so
 // it must not stop a user from operating on a tree that contains one.
 func (d *data) CheckRules(path string) bool {
-	path = d.rulePath(path)
+	if !d.checkRulePath(d.rulePath(path)) {
+		return false
+	}
+	if len(d.settings.Rules) == 0 && len(d.user.Rules) == 0 {
+		return true
+	}
+	resolved, err := files.ResolvedPath(d.user.Fs, path)
+	if err != nil {
+		return false
+	}
+	return d.checkRulePath(d.rulePath(resolved))
+}
+
+func (d *data) checkRulePath(path string) bool {
 
 	allow := true
 	for _, rule := range d.settings.Rules {
