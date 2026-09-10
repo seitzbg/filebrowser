@@ -60,6 +60,9 @@ options you want to change.`,
 			Perm:                  user.Perm,
 			Sorting:               user.Sorting,
 			Commands:              user.Commands,
+			DateFormat:            user.DateFormat,
+			HideDotfiles:          user.HideDotfiles,
+			AceEditorTheme:        user.AceEditorTheme,
 		}
 
 		err = getUserDefaults(flags, &defaults, false)
@@ -75,19 +78,14 @@ options you want to change.`,
 		user.Perm = defaults.Perm
 		user.Commands = defaults.Commands
 		user.Sorting = defaults.Sorting
-		user.LockPassword, err = flags.GetBool("lockPassword")
-		if err != nil {
-			return err
-		}
-
-		user.DateFormat, err = flags.GetBool("dateFormat")
-		if err != nil {
-			return err
-		}
-
-		user.HideDotfiles, err = flags.GetBool("hideDotfiles")
-		if err != nil {
-			return err
+		user.DateFormat = defaults.DateFormat
+		user.HideDotfiles = defaults.HideDotfiles
+		user.AceEditorTheme = defaults.AceEditorTheme
+		if flags.Changed("lockPassword") {
+			user.LockPassword, err = flags.GetBool("lockPassword")
+			if err != nil {
+				return err
+			}
 		}
 
 		if newUsername != "" {
