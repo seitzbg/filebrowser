@@ -166,10 +166,13 @@ func resourcePostHandler(fileCache FileCache) handleFunc {
 			if err != nil {
 				return errToStatus(err), err
 			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return errToStatus(err), err
 		}
 
 		err = d.RunHook(func() error {
-			info, writeErr := writeFile(d.user.Fs, r.URL.Path, r.Body, d.settings.FileMode, d.settings.DirMode)
+			overwrite := d.user.Perm.Modify && r.URL.Query().Get("override") == "true"
+			info, writeErr := writeFile(d.user.Fs, r.URL.Path, r.Body, d.settings.FileMode, d.settings.DirMode, overwrite)
 			if writeErr != nil {
 				return writeErr
 			}
@@ -178,10 +181,6 @@ func resourcePostHandler(fileCache FileCache) handleFunc {
 			w.Header().Set("ETag", etag)
 			return nil
 		}, "upload", r.URL.Path, "", d.user)
-
-		if err != nil {
-			_ = d.user.Fs.RemoveAll(r.URL.Path)
-		}
 
 		return errToStatus(err), err
 	})
@@ -206,7 +205,7 @@ var resourcePutHandler = withUser(func(w http.ResponseWriter, r *http.Request, d
 	}
 
 	err = d.RunHook(func() error {
-		info, writeErr := writeFile(d.user.Fs, r.URL.Path, r.Body, d.settings.FileMode, d.settings.DirMode)
+		info, writeErr := writeFile(d.user.Fs, r.URL.Path, r.Body, d.settings.FileMode, d.settings.DirMode, true)
 		if writeErr != nil {
 			return writeErr
 		}
@@ -343,21 +342,55 @@ func addVersionSuffix(source string, afs afero.Fs) string {
 	return source
 }
 
-func writeFile(afs afero.Fs, dst string, in io.Reader, fileMode, dirMode fs.FileMode) (os.FileInfo, error) {
-	dir, _ := path.Split(dst)
-	err := afs.MkdirAll(dir, dirMode)
+func writeFile(afs afero.Fs, dst string, in io.Reader, fileMode, dirMode fs.FileMode, overwrite bool) (os.FileInfo, error) {
+	// Resolve in-scope aliases so saving through a symlink updates its target.
+	dst, err := files.ResolvedPath(afs, dst)
+	if err != nil {
+		return nil, err
+	}
+	original := ""
+	info, err := afs.Stat(dst)
+	if lstater, ok := afs.(afero.Lstater); ok {
+		info, _, err = lstater.LstatIfPossible(dst)
+	}
+	if err == nil {
+		if !overwrite {
+			return nil, os.ErrExist
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("cannot replace non-regular file: %s", dst)
+		}
+		fileMode = info.Mode().Perm()
+		original = fmt.Sprintf("%d:%d", info.ModTime().UnixNano(), info.Size())
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	dir := filepath.Dir(dst)
+	err = afs.MkdirAll(dir, dirMode)
 	if err != nil {
 		return nil, err
 	}
 
-	file, err := afs.OpenFile(dst, os.O_RDWR|os.O_CREATE|os.O_TRUNC, fileMode)
+	// Stage beside the destination so a failed transfer never truncates it and
+	// the final rename stays on the same filesystem.
+	file, err := afero.TempFile(afs, dir, ".filebrowser-upload-*")
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	temp := filepath.Join(dir, filepath.Base(file.Name()))
+	closed := false
+	defer func() {
+		if !closed {
+			_ = file.Close()
+		}
+		_ = afs.Remove(temp)
+	}()
 
 	_, err = io.Copy(file, in)
 	if err != nil {
+		return nil, err
+	}
+	if err := afs.Chmod(temp, fileMode); err != nil {
 		return nil, err
 	}
 
@@ -368,11 +401,32 @@ func writeFile(afs afero.Fs, dst string, in io.Reader, fileMode, dirMode fs.File
 	}
 
 	// Gets the info about the file.
-	info, err := file.Stat()
+	info, err = file.Stat()
 	if err != nil {
 		return nil, err
 	}
 
+	closed = true
+	if err := file.Close(); err != nil {
+		return nil, err
+	}
+	current, statErr := afs.Stat(dst)
+	if lstater, ok := afs.(afero.Lstater); ok {
+		current, _, statErr = lstater.LstatIfPossible(dst)
+	}
+	switch {
+	case statErr == nil:
+		if !current.Mode().IsRegular() || fmt.Sprintf("%d:%d", current.ModTime().UnixNano(), current.Size()) != original {
+			return nil, fberrors.ErrExist
+		}
+	case !os.IsNotExist(statErr):
+		return nil, statErr
+	case original != "":
+		return nil, fberrors.ErrExist
+	}
+	if err := afs.Rename(temp, dst); err != nil {
+		return nil, err
+	}
 	return info, nil
 }
 

@@ -10,8 +10,6 @@ import (
 	"strings"
 
 	"github.com/gorilla/mux"
-	"golang.org/x/text/cases"
-	"golang.org/x/text/language"
 
 	"github.com/filebrowser/filebrowser/v2/auth"
 	fberrors "github.com/filebrowser/filebrowser/v2/errors"
@@ -183,44 +181,55 @@ var userPutHandler = withSelfOrAdmin(func(w http.ResponseWriter, r *http.Request
 		return http.StatusBadRequest, err
 	}
 
-	if d.settings.AuthMethod == auth.MethodJSONAuth {
-		var sensibleFields = map[string]struct{}{
-			"all":          {},
-			"username":     {},
-			"password":     {},
-			"scope":        {},
-			"lockPassword": {},
-			"commands":     {},
-			"perm":         {},
-		}
-
-		for _, field := range req.Which {
-			if _, ok := sensibleFields[strings.ToLower(field)]; ok {
-				if !users.CheckPwd(req.CurrentPassword, d.user.Password) {
-					return http.StatusBadRequest, fberrors.ErrCurrentPasswordIncorrect
-				}
-				break
-			}
-		}
-	}
-
 	if req.Data.ID != d.raw.(uint) {
 		return http.StatusBadRequest, nil
 	}
 
-	for _, field := range req.Which {
-		if strings.ToLower(field) == "perm" || strings.ToLower(field) == "all" {
-			if req.Data.Perm.Share && !req.Data.Perm.Download {
-				return http.StatusBadRequest, fberrors.ErrShareRequiresDownload
-			}
-		}
-	}
-
-	if len(req.Which) == 0 || (len(req.Which) == 1 && req.Which[0] == "all") {
+	// Canonicalize once for both authorization and storage. Never expose ID or
+	// internal fields through the generic field-update API.
+	fullUpdate := len(req.Which) == 0 || (len(req.Which) == 1 && strings.EqualFold(req.Which[0], "all"))
+	if fullUpdate {
+		req.Which = nil
 		if !d.user.Perm.Admin {
 			return http.StatusForbidden, nil
 		}
+	} else {
+		allowed := map[string]string{}
+		for _, field := range []string{"Username", "Password", "Scope", "Locale", "LockPassword", "ViewMode", "SingleClick", "RedirectAfterCopyMove", "Perm", "Commands", "Sorting", "Rules", "HideDotfiles", "DateFormat", "AceEditorTheme"} {
+			allowed[strings.ToLower(field)] = field
+		}
+		fields := make([]string, 0, len(req.Which))
+		seen := map[string]bool{}
+		for _, field := range req.Which {
+			canonical, ok := allowed[strings.ToLower(field)]
+			if !ok {
+				return http.StatusBadRequest, fberrors.ErrInvalidRequestParams
+			}
+			if !seen[canonical] {
+				fields = append(fields, canonical)
+				seen[canonical] = true
+			}
+		}
+		req.Which = fields
+	}
 
+	requirePassword := fullUpdate
+	changesPermissions := fullUpdate
+	for _, field := range req.Which {
+		switch field {
+		case "Username", "Password", "Scope", "LockPassword", "Commands", "Perm", "Rules":
+			requirePassword = true
+		}
+		changesPermissions = changesPermissions || field == "Perm"
+	}
+	if requirePassword && d.settings.AuthMethod == auth.MethodJSONAuth && !users.CheckPwd(req.CurrentPassword, d.user.Password) {
+		return http.StatusBadRequest, fberrors.ErrCurrentPasswordIncorrect
+	}
+	if changesPermissions && req.Data.Perm.Share && !req.Data.Perm.Download {
+		return http.StatusBadRequest, fberrors.ErrShareRequiresDownload
+	}
+
+	if fullUpdate {
 		if req.Data.Password != "" {
 			req.Data.Password, err = users.ValidateAndHashPwd(req.Data.Password, d.settings.MinimumPasswordLength)
 			if err != nil {
@@ -238,10 +247,7 @@ var userPutHandler = withSelfOrAdmin(func(w http.ResponseWriter, r *http.Request
 		req.Which = []string{}
 	}
 
-	for k, v := range req.Which {
-		v = cases.Title(language.English, cases.NoLower).String(v)
-		req.Which[k] = v
-
+	for _, v := range req.Which {
 		if v == "Password" {
 			if !d.user.Perm.Admin && d.user.LockPassword {
 				return http.StatusForbidden, nil

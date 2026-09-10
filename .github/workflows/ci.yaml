@@ -7,6 +7,10 @@ on:
     tags:
       - "v*"
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   lint-frontend:
@@ -26,6 +30,7 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           pnpm run lint
+          pnpm run typecheck
 
   test-frontend:
     name: Test Frontend
@@ -60,6 +65,18 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      FILEBROWSER_TEST_REDIS_URL: redis://localhost:6379/0
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -91,7 +108,7 @@ jobs:
 
   release:
     name: Release
-    needs: ["lint-frontend", "lint-backend", "test", "build"]
+    needs: ["lint-frontend", "test-frontend", "lint-backend", "test", "build"]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
@@ -128,6 +145,4 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GH_PAT }}
-
-
 
