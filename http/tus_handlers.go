@@ -193,12 +193,14 @@ func tusPostHandler(cache UploadCache) handleFunc {
 			Content:    false,
 		})
 		if err != nil {
+			_ = cache.Complete(key)
 			return errToStatus(err), err
 		}
 
 		// Keep abandoned partial files in both cache backends. A pathname may
 		// have been replaced since registration, so expiry must not delete it.
 		if err := cache.SetStamp(key, uploadStamp(file)); err != nil {
+			_ = cache.Complete(key)
 			return http.StatusServiceUnavailable, err
 		}
 		if uploadLength == 0 {

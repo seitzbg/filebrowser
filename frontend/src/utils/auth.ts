@@ -123,7 +123,17 @@ export async function signup(username: string, password: string) {
 export async function logout(reason?: string) {
   document.cookie = "auth=; Max-Age=0; Path=/; SameSite=Strict;";
 
-  await fetch(`${baseURL}/api/logout`, { method: "POST" });
+  try {
+    const response = await fetch(`${baseURL}/api/logout`, {
+      method: "POST",
+      headers: { "X-Requested-With": "FileBrowser" },
+    });
+    if (!response.ok) {
+      console.warn("Logout request failed", response.status);
+    }
+  } catch (error) {
+    console.warn("Logout request failed", error);
+  }
 
   const authStore = useAuthStore();
   authStore.clearUser();

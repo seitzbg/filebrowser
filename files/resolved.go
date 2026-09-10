@@ -1,6 +1,7 @@
 package files
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,12 @@ import (
 func ResolvedPath(fsys afero.Fs, name string) (string, error) {
 	base := BasePath(fsys)
 	if base == nil {
+		return name, nil
+	}
+	// Afero filesystems without symlink support (including MemMapFs behind
+	// BasePathFs) have no aliases to resolve. Never consult the host filesystem
+	// for paths that exist only in those filesystems.
+	if _, err := base.ReadlinkIfPossible("."); errors.Is(err, afero.ErrNoReadlink) {
 		return name, nil
 	}
 	root, err := filepath.EvalSymlinks(afero.FullBaseFsPath(base, "/"))

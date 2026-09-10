@@ -315,6 +315,12 @@ func setAuthCookie(w http.ResponseWriter, r *http.Request, d *data, token string
 }
 
 func logoutHandler(w http.ResponseWriter, r *http.Request, d *data) (int, error) {
+	// A custom header requires a successful CORS preflight for cross-origin
+	// callers. No CORS permission is granted by this endpoint. Unlike JWT
+	// authentication, this also allows expired sessions to be cleared.
+	if r.Header.Get("X-Requested-With") != "FileBrowser" || r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+		return http.StatusForbidden, nil
+	}
 	setAuthCookie(w, r, d, "", -1)
 	w.Header().Set("Cache-Control", "no-store")
 	return http.StatusNoContent, nil

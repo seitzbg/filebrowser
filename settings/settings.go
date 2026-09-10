@@ -2,8 +2,10 @@ package settings
 
 import (
 	"crypto/rand"
+	"fmt"
 	"io/fs"
 	"log"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -47,27 +49,53 @@ func (s *Settings) GetRules() []rules.Rule {
 
 // Server specific settings.
 type Server struct {
-	Root                   string `json:"root"`
-	BaseURL                string `json:"baseURL"`
-	Socket                 string `json:"socket"`
-	TLSKey                 string `json:"tlsKey"`
-	TLSCert                string `json:"tlsCert"`
-	Port                   string `json:"port"`
-	Address                string `json:"address"`
-	Log                    string `json:"log"`
-	EnableThumbnails       bool   `json:"enableThumbnails"`
-	ResizePreview          bool   `json:"resizePreview"`
-	EnableExec             bool   `json:"enableExec"`
-	TypeDetectionByHeader  bool   `json:"typeDetectionByHeader"`
-	ImageResolutionCal     bool   `json:"imageResolutionCalculation"`
-	AuthHook               string `json:"authHook"`
-	TokenExpirationTime    string `json:"tokenExpirationTime"`
-	FollowExternalSymlinks bool   `json:"followExternalSymlinks"`
+	Root                   string   `json:"root"`
+	BaseURL                string   `json:"baseURL"`
+	Socket                 string   `json:"socket"`
+	TLSKey                 string   `json:"tlsKey"`
+	TLSCert                string   `json:"tlsCert"`
+	Port                   string   `json:"port"`
+	Address                string   `json:"address"`
+	Log                    string   `json:"log"`
+	EnableThumbnails       bool     `json:"enableThumbnails"`
+	ResizePreview          bool     `json:"resizePreview"`
+	EnableExec             bool     `json:"enableExec"`
+	TypeDetectionByHeader  bool     `json:"typeDetectionByHeader"`
+	ImageResolutionCal     bool     `json:"imageResolutionCalculation"`
+	AuthHook               string   `json:"authHook"`
+	TokenExpirationTime    string   `json:"tokenExpirationTime"`
+	FollowExternalSymlinks bool     `json:"followExternalSymlinks"`
+	TrustedProxies         []string `json:"trustedProxies"`
 
 	// CaseInsensitiveFs is detected from Root at startup rather than
 	// configured, and tells the rule checker to match paths case-insensitively.
 	// It is never persisted.
 	CaseInsensitiveFs bool `json:"-"`
+}
+
+// TrustedProxyPrefixes validates the explicitly trusted reverse proxy peers.
+func (s *Server) TrustedProxyPrefixes() ([]netip.Prefix, error) {
+	prefixes := make([]netip.Prefix, 0, len(s.TrustedProxies))
+	for _, value := range s.TrustedProxies {
+		value = strings.TrimSpace(value)
+		prefix, err := netip.ParsePrefix(value)
+		if err != nil {
+			addr, addrErr := netip.ParseAddr(value)
+			if addrErr != nil || addr.Zone() != "" {
+				return nil, fmt.Errorf("invalid trusted proxy %q: expected an IP address or CIDR", value)
+			}
+			addr = addr.Unmap()
+			prefix = netip.PrefixFrom(addr, addr.BitLen())
+		}
+		if prefix.Addr().Is4In6() {
+			if prefix.Bits() < 96 {
+				return nil, fmt.Errorf("invalid IPv4-mapped trusted proxy prefix %q", value)
+			}
+			prefix = netip.PrefixFrom(prefix.Addr().Unmap(), prefix.Bits()-96)
+		}
+		prefixes = append(prefixes, prefix.Masked())
+	}
+	return prefixes, nil
 }
 
 // Clean cleans any variables that might need cleaning.

@@ -27,6 +27,10 @@ func NewHandler(
 	assetsFs fs.FS,
 ) (http.Handler, error) {
 	server.Clean()
+	trustedProxies, err := server.TrustedProxyPrefixes()
+	if err != nil {
+		return nil, err
+	}
 	server.CaseInsensitiveFs = files.CaseInsensitive(afero.NewOsFs(), server.Root)
 
 	r := mux.NewRouter()
@@ -89,5 +93,5 @@ func NewHandler(
 	public.PathPrefix("/dl").Handler(monkey(publicDlHandler, "/api/public/dl/")).Methods("GET")
 	public.PathPrefix("/share").Handler(monkey(publicShareHandler, "/api/public/share/")).Methods("GET")
 
-	return stripPrefix(server.BaseURL, secureHandler(r)), nil
+	return stripPrefix(server.BaseURL, secureHandler(r, trustedProxies...)), nil
 }

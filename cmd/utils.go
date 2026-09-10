@@ -204,8 +204,10 @@ func marshal(filename string, data interface{}) error {
 	if err != nil {
 		return err
 	}
-	defer fd.Close()
-	defer os.Remove(fd.Name())
+	defer func() {
+		_ = fd.Close()
+		_ = os.Remove(fd.Name())
+	}()
 
 	switch ext := filepath.Ext(filename); ext {
 	case ".json":

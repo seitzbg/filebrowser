@@ -13,6 +13,7 @@ const plugins = [
   legacy({
     // defaults already drop IE support
     targets: ["defaults"],
+    additionalLegacyPolyfills: ["core-js/proposals/global-this"],
   }),
   compression({ include: /\.js$/, deleteOriginalAssets: false }),
 ];
