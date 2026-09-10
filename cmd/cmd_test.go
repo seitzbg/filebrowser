@@ -59,3 +59,18 @@ func TestGetSettingsFollowExternalSymlinks(t *testing.T) {
 		t.Error("expected FollowExternalSymlinks to be persisted as true")
 	}
 }
+
+func TestGetSettingsTrustedProxies(t *testing.T) {
+	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	addConfigFlags(flags)
+	if err := flags.Parse([]string{"--trustedProxies=10.0.0.2/32,2001:db8::/64"}); err != nil {
+		t.Fatal(err)
+	}
+	ser := &settings.Server{}
+	if _, err := getSettings(flags, &settings.Settings{AuthMethod: auth.MethodJSONAuth}, ser, &auth.JSONAuth{}, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(ser.TrustedProxies) != 2 || ser.TrustedProxies[0] != "10.0.0.2/32" {
+		t.Fatalf("trusted proxies = %v", ser.TrustedProxies)
+	}
+}

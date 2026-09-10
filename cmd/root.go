@@ -113,6 +113,7 @@ func addServerFlags(flags *pflag.FlagSet) {
 	flags.Bool("disableTypeDetectionByHeader", false, "disables type detection by reading file headers")
 	flags.Bool("disableImageResolutionCalc", false, "disables image resolution calculation by reading image files")
 	flags.Bool("followExternalSymlinks", false, "follow symlinks whose target is outside the user scope (unsafe)")
+	flags.StringSlice("trustedProxies", nil, "trusted proxy IP addresses or CIDRs for X-Forwarded-For client rate limits")
 }
 
 var rootCmd = &cobra.Command{
@@ -253,6 +254,7 @@ user created with the credentials from options "username" and "password".`,
 		srv := &http.Server{
 			Handler:           handler,
 			ReadHeaderTimeout: 60 * time.Second,
+			IdleTimeout:       60 * time.Second,
 		}
 
 		go func() {
@@ -362,6 +364,9 @@ func getServerSettings(v *viper.Viper, st *storage.Storage) (*settings.Server, e
 
 	if v.IsSet("followExternalSymlinks") {
 		server.FollowExternalSymlinks = v.GetBool("followExternalSymlinks")
+	}
+	if v.IsSet("trustedProxies") {
+		server.TrustedProxies = v.GetStringSlice("trustedProxies")
 	}
 
 	if isAddrSet && isSocketSet {
@@ -490,6 +495,7 @@ func quickSetup(v *viper.Viper, s *storage.Storage) error {
 		TypeDetectionByHeader:  !v.GetBool("disableTypeDetectionByHeader"),
 		ImageResolutionCal:     !v.GetBool("disableImageResolutionCalc"),
 		FollowExternalSymlinks: v.GetBool("followExternalSymlinks"),
+		TrustedProxies:         v.GetStringSlice("trustedProxies"),
 	}
 
 	err = s.Settings.SaveServer(ser)

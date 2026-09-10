@@ -7,7 +7,9 @@ services:
     ports:
       - 8000:80
     volumes:
-      - filebrowser:/flux/vault
+      - filebrowser:/srv
+      - filebrowser_database:/database
+      - filebrowser_config:/config
     environment:
       - FB_REDIS_CACHE_URL=redis://default:filebrowser@redis:6379 # Use rediss:// for ssl
 
@@ -30,3 +32,5 @@ networks:
 
 volumes:
   filebrowser:
+  filebrowser_database:
+  filebrowser_config:

@@ -47,7 +47,7 @@ func getUser(_ http.ResponseWriter, r *http.Request) (*modifyUserRequest, error)
 		return nil, err
 	}
 
-	if req.What != "user" {
+	if req.What != "user" || req.Data == nil {
 		return nil, fberrors.ErrInvalidDataType
 	}
 

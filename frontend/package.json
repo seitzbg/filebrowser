@@ -2,6 +2,13 @@
   "name": "filebrowser-frontend",
   "version": "3.0.0",
   "private": true,
+  "pnpm": {
+    "overrides": {
+      "@xmldom/xmldom": "^0.8.15",
+      "lodash": "^4.18.1",
+      "nanoid@3": "^3.3.18"
+    }
+  },
   "type": "module",
   "engines": {
     "node": ">=24.0.0",
@@ -22,9 +29,9 @@
     "@vueuse/core": "^14.0.0",
     "@vueuse/integrations": "^14.0.0",
     "ace-builds": "^1.43.2",
-    "csv-parse": "^6.1.0",
+    "csv-parse": "^7.0.2",
     "dayjs": "^1.11.13",
-    "dompurify": "^3.2.6",
+    "dompurify": "^3.4.13",
     "epubjs": "^0.3.93",
     "filesize": "^11.0.13",
     "js-base64": "^3.7.7",
@@ -65,7 +72,7 @@
     "eslint-config-prettier": "^10.1.5",
     "eslint-plugin-prettier": "^5.5.1",
     "eslint-plugin-vue": "^10.5.1",
-    "postcss": "^8.5.6",
+    "postcss": "^8.5.23",
     "prettier": "^3.6.2",
     "terser": "^5.43.1",
     "typescript": "^5.9.3",

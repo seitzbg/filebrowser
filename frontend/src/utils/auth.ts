@@ -10,9 +10,10 @@ export function parseToken(token: string) {
   // falsy or malformed jwt will throw InvalidTokenError
   const data = jwtDecode<JwtPayload & { user: IUser }>(token);
 
-  document.cookie = `auth=${token}; Path=/; SameSite=Strict;`;
-
-  localStorage.setItem("jwt", token);
+  // Session persistence is handled by the server's HttpOnly cookie.
+  // Remove the legacy script-readable root cookie after upgrading.
+  document.cookie = "auth=; Max-Age=0; Path=/; SameSite=Strict;";
+  localStorage.removeItem("jwt");
 
   const authStore = useAuthStore();
   authStore.jwt = token;
@@ -39,8 +40,12 @@ export function parseToken(token: string) {
 
 export async function validateLogin() {
   try {
-    if (localStorage.getItem("jwt")) {
-      await renew(<string>localStorage.getItem("jwt"));
+    localStorage.removeItem("jwt");
+    const res = await fetch(`${baseURL}/api/session`);
+    if (res.ok) {
+      parseToken(await res.text());
+    } else if (res.status !== 401) {
+      throw new StatusError(res.statusText, res.status);
     }
   } catch (error) {
     console.warn("Invalid JWT token in storage");
@@ -115,13 +120,25 @@ export async function signup(username: string, password: string) {
   }
 }
 
-export function logout(reason?: string) {
+export async function logout(reason?: string) {
   document.cookie = "auth=; Max-Age=0; Path=/; SameSite=Strict;";
+
+  try {
+    const response = await fetch(`${baseURL}/api/logout`, {
+      method: "POST",
+      headers: { "X-Requested-With": "FileBrowser" },
+    });
+    if (!response.ok) {
+      console.warn("Logout request failed", response.status);
+    }
+  } catch (error) {
+    console.warn("Logout request failed", error);
+  }
 
   const authStore = useAuthStore();
   authStore.clearUser();
 
-  localStorage.setItem("jwt", "");
+  localStorage.removeItem("jwt");
   if (noAuth) {
     window.location.reload();
   } else if (logoutPage !== "/login") {

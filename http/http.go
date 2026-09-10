@@ -27,15 +27,13 @@ func NewHandler(
 	assetsFs fs.FS,
 ) (http.Handler, error) {
 	server.Clean()
+	trustedProxies, err := server.TrustedProxyPrefixes()
+	if err != nil {
+		return nil, err
+	}
 	server.CaseInsensitiveFs = files.CaseInsensitive(afero.NewOsFs(), server.Root)
 
 	r := mux.NewRouter()
-	r.Use(func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Security-Policy", `default-src 'self'; style-src 'unsafe-inline';`)
-			next.ServeHTTP(w, r)
-		})
-	})
 	index, static := getStaticHandlers(store, server, assetsFs)
 
 	monkey := func(fn handleFunc, prefix string) http.Handler {
@@ -49,9 +47,11 @@ func NewHandler(
 	api := r.PathPrefix("/api").Subrouter()
 
 	tokenExpirationTime := server.GetTokenExpirationTime(DefaultTokenExpirationTime)
-	api.Handle("/login", monkey(loginHandler(tokenExpirationTime), ""))
-	api.Handle("/signup", monkey(signupHandler, ""))
-	api.Handle("/renew", monkey(renewHandler(tokenExpirationTime), ""))
+	api.Handle("/login", monkey(loginHandler(tokenExpirationTime), "")).Methods("POST")
+	api.Handle("/signup", monkey(signupHandler, "")).Methods("POST")
+	api.Handle("/renew", monkey(renewHandler(tokenExpirationTime), "")).Methods("POST")
+	api.Handle("/session", monkey(renewHandler(tokenExpirationTime), "")).Methods("GET")
+	api.Handle("/logout", monkey(logoutHandler, "")).Methods("POST")
 
 	users := api.PathPrefix("/users").Subrouter()
 	users.Handle("", monkey(usersGetHandler, "")).Methods("GET")
@@ -93,5 +93,5 @@ func NewHandler(
 	public.PathPrefix("/dl").Handler(monkey(publicDlHandler, "/api/public/dl/")).Methods("GET")
 	public.PathPrefix("/share").Handler(monkey(publicShareHandler, "/api/public/share/")).Methods("GET")
 
-	return stripPrefix(server.BaseURL, r), nil
+	return stripPrefix(server.BaseURL, secureHandler(r, trustedProxies...)), nil
 }

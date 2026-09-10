@@ -40,6 +40,7 @@ type Storage struct {
 	// provision serializes the scope-collision check and the save of newly
 	// provisioned users, which must not interleave. See SaveProvisioned.
 	provision sync.Mutex
+	mutation  sync.Mutex
 }
 
 // NewStorage creates a users storage from a backend.
@@ -89,6 +90,11 @@ func (s *Storage) Gets(baseScope string, followExternalSymlinks bool) ([]*User, 
 
 // Update updates a user in the database.
 func (s *Storage) Update(user *User, fields ...string) error {
+	s.mutation.Lock()
+	defer s.mutation.Unlock()
+	if err := s.checkAdminChange(user, fields...); err != nil {
+		return err
+	}
 	err := user.Clean("", false, fields...)
 	if err != nil {
 		return err
@@ -107,6 +113,11 @@ func (s *Storage) Update(user *User, fields ...string) error {
 
 // Save saves the user in a storage.
 func (s *Storage) Save(user *User) error {
+	s.mutation.Lock()
+	defer s.mutation.Unlock()
+	if err := s.checkAdminChange(user); err != nil {
+		return err
+	}
 	if err := user.Clean("", false); err != nil {
 		return err
 	}
@@ -144,6 +155,8 @@ func (s *Storage) SaveProvisioned(user *User, derivedScope bool) error {
 // id must be a string for username lookup or a uint for id lookup. If id
 // is neither, a ErrInvalidDataType will be returned.
 func (s *Storage) Delete(id interface{}) error {
+	s.mutation.Lock()
+	defer s.mutation.Unlock()
 	switch id := id.(type) {
 	case string:
 		user, err := s.back.GetBy(id)
@@ -168,6 +181,51 @@ func (s *Storage) Delete(id interface{}) error {
 	default:
 		return fberrors.ErrInvalidDataType
 	}
+}
+
+func (s *Storage) checkAdminChange(user *User, fields ...string) error {
+	if user == nil {
+		return fberrors.ErrInvalidDataType
+	}
+	changesPerm := len(fields) == 0
+	for _, field := range fields {
+		changesPerm = changesPerm || field == "Perm"
+	}
+	if !changesPerm || user.ID == 0 || user.Perm.Admin {
+		return nil
+	}
+	previous, err := s.back.GetBy(user.ID)
+	if errors.Is(err, fberrors.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if s.IsUniqueAdmin(previous) {
+		return fberrors.ErrRootUserDeletion
+	}
+	return nil
+}
+
+// Import atomically validates and imports a batch of users.
+func (s *Storage) Import(list []*User, replace, overwrite bool) error {
+	s.mutation.Lock()
+	defer s.mutation.Unlock()
+	for _, user := range list {
+		if user == nil {
+			return fberrors.ErrInvalidDataType
+		}
+		if err := user.Clean("", false); err != nil {
+			return err
+		}
+	}
+	backend, ok := s.back.(interface {
+		Import([]*User, bool, bool) error
+	})
+	if !ok {
+		return errors.New("storage backend does not support atomic imports")
+	}
+	return backend.Import(list, replace, overwrite)
 }
 
 // LastUpdate gets the timestamp for the last update of an user.

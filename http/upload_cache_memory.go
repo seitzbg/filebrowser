@@ -3,6 +3,7 @@ package fbhttp
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/jellydator/ttlcache/v3"
@@ -18,13 +19,18 @@ type UploadCache interface {
 	// the upload expires before completion, to delete the partial file; it must
 	// route through the uploading user's scoped filesystem so that eviction
 	// cannot follow a symlink out of the user's scope.
-	Register(filePath string, fileSize int64, remove func() error)
+	Register(filePath string, fileSize int64, remove func() error) error
 
 	// Complete removes an upload from the cache
-	Complete(filePath string)
+	Complete(filePath string) error
+
+	// Lock serializes operations on a physical upload path across replicas.
+	Lock(filePath string) (func(), error)
 
 	// GetLength returns the expected file size for an active upload
 	GetLength(filePath string) (int64, error)
+	GetStamp(filePath string) (string, error)
+	SetStamp(filePath, stamp string) error
 
 	// Touch refreshes the TTL for an active upload
 	Touch(filePath string)
@@ -36,12 +42,14 @@ type UploadCache interface {
 // memoryUploadEntry is the value stored for each active upload.
 type memoryUploadEntry struct {
 	size   int64
+	stamp  string
 	remove func() error
 }
 
 // memoryUploadCache is an upload cache for single replica deployments
 type memoryUploadCache struct {
 	cache *ttlcache.Cache[string, memoryUploadEntry]
+	locks sync.Map
 }
 
 func newMemoryUploadCache() *memoryUploadCache {
@@ -65,12 +73,21 @@ func newMemoryUploadCache() *memoryUploadCache {
 	return &memoryUploadCache{cache: cache}
 }
 
-func (c *memoryUploadCache) Register(filePath string, fileSize int64, remove func() error) {
+func (c *memoryUploadCache) Register(filePath string, fileSize int64, remove func() error) error {
 	c.cache.Set(filePath, memoryUploadEntry{size: fileSize, remove: remove}, uploadCacheTTL)
+	return nil
 }
 
-func (c *memoryUploadCache) Complete(filePath string) {
+func (c *memoryUploadCache) Complete(filePath string) error {
 	c.cache.Delete(filePath)
+	return nil
+}
+
+func (c *memoryUploadCache) Lock(filePath string) (func(), error) {
+	if _, loaded := c.locks.LoadOrStore(filePath, struct{}{}); loaded {
+		return nil, fmt.Errorf("upload is busy")
+	}
+	return func() { c.locks.Delete(filePath) }, nil
 }
 
 func (c *memoryUploadCache) GetLength(filePath string) (int64, error) {
@@ -83,6 +100,25 @@ func (c *memoryUploadCache) GetLength(filePath string) (int64, error) {
 
 func (c *memoryUploadCache) Touch(filePath string) {
 	c.cache.Touch(filePath)
+}
+
+func (c *memoryUploadCache) GetStamp(filePath string) (string, error) {
+	item := c.cache.Get(filePath)
+	if item == nil {
+		return "", fmt.Errorf("no active upload")
+	}
+	return item.Value().stamp, nil
+}
+
+func (c *memoryUploadCache) SetStamp(filePath, stamp string) error {
+	item := c.cache.Get(filePath)
+	if item == nil {
+		return fmt.Errorf("no active upload")
+	}
+	entry := item.Value()
+	entry.stamp = stamp
+	c.cache.Set(filePath, entry, uploadCacheTTL)
+	return nil
 }
 
 func (c *memoryUploadCache) Close() {

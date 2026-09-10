@@ -2,10 +2,12 @@ package auth
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/filebrowser/filebrowser/v2/settings"
 	"github.com/filebrowser/filebrowser/v2/users"
@@ -93,7 +95,7 @@ func (r *ReCaptcha) Ok(response string) (bool, error) {
 	body.Set("secret", r.Secret)
 	body.Add("response", response)
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: 10 * time.Second}
 
 	resp, err := client.Post(
 		r.Host+reCaptchaAPI,
@@ -113,7 +115,7 @@ func (r *ReCaptcha) Ok(response string) (bool, error) {
 		Success bool `json:"success"`
 	}
 
-	err = json.NewDecoder(resp.Body).Decode(&data)
+	err = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&data)
 	if err != nil {
 		return false, err
 	}

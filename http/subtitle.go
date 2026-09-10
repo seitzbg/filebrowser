@@ -49,17 +49,25 @@ func subtitleFileHandler(w http.ResponseWriter, r *http.Request, file *files.Fil
 		return http.StatusInternalServerError, err
 	}
 	defer fd.Close()
+	const maxSubtitleBytes = 8 << 20
+	if file.Size > maxSubtitleBytes {
+		return http.StatusRequestEntityTooLarge, nil
+	}
+	content, readErr := io.ReadAll(io.LimitReader(fd, maxSubtitleBytes+1))
+	if readErr != nil {
+		return http.StatusInternalServerError, readErr
+	}
+	if len(content) > maxSubtitleBytes {
+		return http.StatusRequestEntityTooLarge, nil
+	}
+	name := strings.ToLower(file.Name)
 
 	// load subtitle for conversion to vtt
 	var sub *astisub.Subtitles
-	if strings.HasSuffix(file.Name, ".srt") {
-		content, readErr := io.ReadAll(fd)
-		if readErr != nil {
-			return http.StatusInternalServerError, readErr
-		}
+	if strings.HasSuffix(name, ".srt") {
 		sub, err = astisub.ReadFromSRT(bytes.NewReader(normalizeSRTLineBreaks(content)))
-	} else if strings.HasSuffix(file.Name, ".ass") || strings.HasSuffix(file.Name, ".ssa") {
-		sub, err = astisub.ReadFromSSA(fd)
+	} else if strings.HasSuffix(name, ".ass") || strings.HasSuffix(name, ".ssa") {
+		sub, err = astisub.ReadFromSSA(bytes.NewReader(content))
 	}
 	if err != nil {
 		return http.StatusInternalServerError, err
@@ -73,7 +81,7 @@ func subtitleFileHandler(w http.ResponseWriter, r *http.Request, file *files.Fil
 
 	// serve vtt file directly
 	if sub == nil {
-		http.ServeContent(w, r, file.Name, file.ModTime, fd)
+		http.ServeContent(w, r, file.Name, file.ModTime, bytes.NewReader(content))
 		return 0, nil
 	}
 

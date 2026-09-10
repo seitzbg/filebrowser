@@ -200,23 +200,36 @@ func withStore(fn func(cmd *cobra.Command, args []string, store *store) error, o
 }
 
 func marshal(filename string, data interface{}) error {
-	fd, err := os.Create(filename)
+	fd, err := os.CreateTemp(filepath.Dir(filename), ".filebrowser-export-*")
 	if err != nil {
 		return err
 	}
-	defer fd.Close()
+	defer func() {
+		_ = fd.Close()
+		_ = os.Remove(fd.Name())
+	}()
 
 	switch ext := filepath.Ext(filename); ext {
 	case ".json":
 		encoder := json.NewEncoder(fd)
 		encoder.SetIndent("", "    ")
-		return encoder.Encode(data)
+		err = encoder.Encode(data)
 	case ".yml", ".yaml":
 		encoder := yaml.NewEncoder(fd)
-		return encoder.Encode(data)
+		err = encoder.Encode(data)
 	default:
 		return errors.New("invalid format: " + ext)
 	}
+	if err != nil {
+		return err
+	}
+	if err = fd.Sync(); err != nil {
+		return err
+	}
+	if err = fd.Close(); err != nil {
+		return err
+	}
+	return os.Rename(fd.Name(), filename)
 }
 
 func unmarshal(filename string, data interface{}) error {

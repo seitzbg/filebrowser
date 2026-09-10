@@ -1,11 +1,13 @@
 package runner
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/filebrowser/filebrowser/v2/settings"
 	"github.com/filebrowser/filebrowser/v2/users"
@@ -19,36 +21,32 @@ type Runner struct {
 
 // RunHook runs the hooks for the before and after event.
 func (r *Runner) RunHook(fn func() error, evt, path, dst string, user *users.User) error {
-	path = user.FullPath(path)
-	dst = user.FullPath(dst)
-
-	if r.Enabled {
-		if val, ok := r.Commands["before_"+evt]; ok {
-			for _, command := range val {
-				err := r.exec(command, "before_"+evt, path, dst, user)
-				if err != nil {
-					return err
-				}
-			}
-		}
-	}
-
-	err := fn()
-	if err != nil {
+	if err := r.RunBeforeHook(evt, path, dst, user); err != nil {
 		return err
 	}
+	if err := fn(); err != nil {
+		return err
+	}
+	return r.RunAfterHook(evt, path, dst, user)
+}
 
-	if r.Enabled {
-		if val, ok := r.Commands["after_"+evt]; ok {
-			for _, command := range val {
-				err := r.exec(command, "after_"+evt, path, dst, user)
-				if err != nil {
-					return err
-				}
-			}
+func (r *Runner) RunBeforeHook(evt, path, dst string, user *users.User) error {
+	return r.runEvent("before_"+evt, path, dst, user)
+}
+
+func (r *Runner) RunAfterHook(evt, path, dst string, user *users.User) error {
+	return r.runEvent("after_"+evt, path, dst, user)
+}
+
+func (r *Runner) runEvent(evt, path, dst string, user *users.User) error {
+	if !r.Enabled {
+		return nil
+	}
+	for _, command := range r.Commands[evt] {
+		if err := r.exec(command, evt, user.FullPath(path), user.FullPath(dst), user); err != nil {
+			return err
 		}
 	}
-
 	return nil
 }
 
@@ -82,14 +80,18 @@ func (r *Runner) exec(raw, evt, path, dst string, user *users.User) error {
 		}
 	}
 	for i, arg := range command {
-		if i == 0 {
+		// Shells expand the environment themselves. Substituting into shell
+		// source here would turn user-controlled filenames into executable code.
+		if i == 0 || (len(r.Shell) > 0 && r.Shell[0] != "") {
 			continue
 		}
 
 		command[i] = os.Expand(arg, envMapping)
 	}
 
-	cmd := exec.Command(command[0], command[1:]...)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
+	cmd.WaitDelay = time.Second
 	cmd.Env = append(os.Environ(), fmt.Sprintf("FILE=%s", path))
 	cmd.Env = append(cmd.Env, fmt.Sprintf("SCOPE=%s", user.Scope))
 	cmd.Env = append(cmd.Env, fmt.Sprintf("TRIGGER=%s", evt))
@@ -102,17 +104,20 @@ func (r *Runner) exec(raw, evt, path, dst string, user *users.User) error {
 
 	if !blocking {
 		log.Printf("[INFO] Nonblocking Command: \"%s\"", strings.Join(command, " "))
-		defer func() {
-			go func() {
-				err := cmd.Wait()
-				if err != nil {
-					log.Printf("[INFO] Nonblocking Command \"%s\" failed: %s", strings.Join(command, " "), err)
-				}
-			}()
+		if err := cmd.Start(); err != nil {
+			cancel()
+			return err
+		}
+		go func() {
+			defer cancel()
+			if err := cmd.Wait(); err != nil {
+				log.Printf("[INFO] Nonblocking Command \"%s\" failed: %s", strings.Join(command, " "), err)
+			}
 		}()
-		return cmd.Start()
+		return nil
 	}
 
+	defer cancel()
 	log.Printf("[INFO] Blocking Command: \"%s\"", strings.Join(command, " "))
 	return cmd.Run()
 }

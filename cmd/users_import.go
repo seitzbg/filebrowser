@@ -2,9 +2,6 @@ package cmd
 
 import (
 	"errors"
-	"fmt"
-	"os"
-	"strconv"
 
 	"github.com/spf13/cobra"
 
@@ -27,19 +24,16 @@ list or set it to 0.`,
 	Args: jsonYamlArg,
 	RunE: withStore(func(cmd *cobra.Command, args []string, st *store) error {
 		flags := cmd.Flags()
-		fd, err := os.Open(args[0])
-		if err != nil {
-			return err
-		}
-		defer fd.Close()
-
 		list := []*users.User{}
-		err = unmarshal(args[0], &list)
+		err := unmarshal(args[0], &list)
 		if err != nil {
 			return err
 		}
 
 		for _, user := range list {
+			if user == nil {
+				return errors.New("null user in import")
+			}
 			err = user.Clean("", false)
 			if err != nil {
 				return err
@@ -57,16 +51,9 @@ list or set it to 0.`,
 				return userImportErr
 			}
 
-			err = marshal("users.backup.json", list)
+			err = marshal("users.backup.json", oldUsers)
 			if err != nil {
 				return err
-			}
-
-			for _, user := range oldUsers {
-				err = st.Users.Delete(user.ID)
-				if err != nil {
-					return err
-				}
 			}
 		}
 
@@ -75,39 +62,12 @@ list or set it to 0.`,
 			return err
 		}
 
-		for _, user := range list {
-			onDB, err := st.Users.Get("", false, user.ID)
-
-			// User exists in DB.
-			if err == nil {
-				if !overwrite {
-					return errors.New("user " + strconv.Itoa(int(user.ID)) + " is already registered")
-				}
-
-				// If the usernames mismatch, check if there is another one in the DB
-				// with the new username. If there is, print an error and cancel the
-				// operation
-				if user.Username != onDB.Username {
-					if conflictuous, err := st.Users.Get("", false, user.Username); err == nil {
-						return usernameConflictError(user.Username, conflictuous.ID, user.ID)
-					}
-				}
-			} else {
-				// If it doesn't exist, set the ID to 0 to automatically get a new
-				// one that make sense in this DB.
-				user.ID = 0
-			}
-
-			err = st.Users.Save(user)
-			if err != nil {
-				return err
-			}
+		importer, ok := st.Users.(interface {
+			Import([]*users.User, bool, bool) error
+		})
+		if !ok {
+			return errors.New("storage does not support atomic imports")
 		}
-		return nil
+		return importer.Import(list, replace, overwrite)
 	}, storeOptions{}),
-}
-
-func usernameConflictError(username string, originalID, newID uint) error {
-	return fmt.Errorf(`can't import user with ID %d and username "%s" because the username is already registered with the user %d`,
-		newID, username, originalID)
 }

@@ -155,6 +155,17 @@ func withAdmin(fn handleFunc) handleFunc {
 
 func loginHandler(tokenExpireTime time.Duration) handleFunc {
 	return func(w http.ResponseWriter, r *http.Request, d *data) (int, error) {
+		if d.settings.AuthMethod == fbAuth.MethodJSONAuth || d.settings.AuthMethod == fbAuth.MethodHookAuth {
+			if !passwordAttempts.allow(r) {
+				w.Header().Set("Retry-After", "60")
+				return http.StatusTooManyRequests, nil
+			}
+			release, ok := acquirePasswordWorker()
+			if !ok {
+				return http.StatusTooManyRequests, nil
+			}
+			defer release()
+		}
 		if r.Body != nil {
 			r.Body = http.MaxBytesReader(w, r.Body, maxAuthBodySize)
 		}
@@ -185,7 +196,15 @@ var signupHandler = func(w http.ResponseWriter, r *http.Request, d *data) (int, 
 	if !d.settings.Signup {
 		return http.StatusMethodNotAllowed, nil
 	}
-
+	if !passwordAttempts.allow(r) {
+		w.Header().Set("Retry-After", "60")
+		return http.StatusTooManyRequests, nil
+	}
+	release, ok := acquirePasswordWorker()
+	if !ok {
+		return http.StatusTooManyRequests, nil
+	}
+	defer release()
 	if r.Body == nil {
 		return http.StatusBadRequest, nil
 	}
@@ -249,7 +268,7 @@ func renewHandler(tokenExpireTime time.Duration) handleFunc {
 	})
 }
 
-func printToken(w http.ResponseWriter, _ *http.Request, d *data, user *users.User, tokenExpirationTime time.Duration) (int, error) {
+func printToken(w http.ResponseWriter, r *http.Request, d *data, user *users.User, tokenExpirationTime time.Duration) (int, error) {
 	claims := &authToken{
 		User: userInfo{
 			ID:                    user.ID,
@@ -279,8 +298,30 @@ func printToken(w http.ResponseWriter, _ *http.Request, d *data, user *users.Use
 	}
 
 	w.Header().Set("Content-Type", "text/plain")
+	w.Header().Set("Cache-Control", "no-store")
+	setAuthCookie(w, r, d, signed, int(tokenExpirationTime.Seconds()))
 	if _, err := w.Write([]byte(signed)); err != nil {
 		return http.StatusInternalServerError, err
 	}
 	return 0, nil
+}
+
+func setAuthCookie(w http.ResponseWriter, r *http.Request, d *data, token string, maxAge int) {
+	http.SetCookie(w, &http.Cookie{
+		Name: "auth", Value: token, Path: strings.TrimRight(d.server.BaseURL, "/") + "/",
+		HttpOnly: true, Secure: r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
+		SameSite: http.SameSiteStrictMode, MaxAge: maxAge,
+	})
+}
+
+func logoutHandler(w http.ResponseWriter, r *http.Request, d *data) (int, error) {
+	// A custom header requires a successful CORS preflight for cross-origin
+	// callers. No CORS permission is granted by this endpoint. Unlike JWT
+	// authentication, this also allows expired sessions to be cleared.
+	if r.Header.Get("X-Requested-With") != "FileBrowser" || r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+		return http.StatusForbidden, nil
+	}
+	setAuthCookie(w, r, d, "", -1)
+	w.Header().Set("Cache-Control", "no-store")
+	return http.StatusNoContent, nil
 }

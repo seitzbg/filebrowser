@@ -154,6 +154,14 @@ func authenticateShareRequest(r *http.Request, l *share.Link) (int, error) {
 	if password == "" {
 		return http.StatusUnauthorized, nil
 	}
+	if !passwordAttempts.allow(r) {
+		return http.StatusTooManyRequests, nil
+	}
+	release, ok := acquirePasswordWorker()
+	if !ok {
+		return http.StatusTooManyRequests, nil
+	}
+	defer release()
 	if err := bcrypt.CompareHashAndPassword([]byte(l.PasswordHash), []byte(password)); err != nil {
 		if errors.Is(err, bcrypt.ErrMismatchedHashAndPassword) {
 			return http.StatusUnauthorized, nil

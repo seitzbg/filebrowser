@@ -59,4 +59,21 @@ func TestSubtitleFileHandlerConvertsSRTBreakTags(t *testing.T) {
 	if !strings.Contains(body, "First\nSecond\nThird\nFourth") {
 		t.Fatalf("WebVTT output = %q, want converted SRT <br> tags as line breaks", body)
 	}
+	file.Name = "SAMPLE.SRT"
+	rec = httptest.NewRecorder()
+	if status, err := subtitleFileHandler(rec, req, file); err != nil || status != 0 || !strings.Contains(rec.Body.String(), "WEBVTT") {
+		t.Fatalf("uppercase subtitle conversion: status=%d err=%v", status, err)
+	}
+}
+
+func TestSubtitleInputLimitIgnoresStaleSize(t *testing.T) {
+	f := afero.NewMemMapFs()
+	if err := afero.WriteFile(f, "/large.srt", []byte(strings.Repeat("x", (8<<20)+1)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	file := &files.FileInfo{Fs: f, Path: "/large.srt", Name: "large.srt", Size: 0}
+	status, err := subtitleFileHandler(httptest.NewRecorder(), httptest.NewRequest("GET", "/large.srt", nil), file)
+	if err != nil || status != 413 {
+		t.Fatalf("large subtitle: status=%d err=%v", status, err)
+	}
 }

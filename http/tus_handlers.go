@@ -1,6 +1,7 @@
 package fbhttp
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +20,63 @@ import (
 // keep the connection reusable. It comfortably covers a default-sized chunk;
 // beyond that the body is not worth reading just to throw away.
 const maxPatchDrainBytes = 32 << 20 // 32MB
+
+func uploadKey(d *data, path string) string {
+	return strconv.FormatUint(uint64(d.user.ID), 10) + ":" + d.user.FullPath(path)
+}
+
+func uploadStamp(file *files.FileInfo) string {
+	return fmt.Sprintf("%d:%d", file.ModTime.UnixNano(), file.Size)
+}
+
+func validateUploadFile(cache UploadCache, key string, file *files.FileInfo) error {
+	stamp, err := cache.GetStamp(key)
+	if err != nil {
+		return err
+	}
+	if stamp == "" || stamp != uploadStamp(file) {
+		return fmt.Errorf("upload target changed; restart the upload")
+	}
+	return nil
+}
+
+func withUploadLock(cache UploadCache, fn handleFunc) handleFunc {
+	return func(w http.ResponseWriter, r *http.Request, d *data) (int, error) {
+		resolved, err := files.ResolvedPath(d.user.Fs, r.URL.Path)
+		if err != nil {
+			return errToStatus(err), err
+		}
+		unlock, err := cache.Lock(d.user.FullPath(resolved))
+		if err != nil {
+			return http.StatusConflict, err
+		}
+		defer unlock()
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+		defer cancel()
+		r = r.WithContext(ctx)
+		if body, ok := r.Body.(*deadlineBody); ok {
+			body.deadline, _ = ctx.Deadline()
+		}
+		r.Body = &uploadBody{ReadCloser: r.Body, ctx: ctx}
+		_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(30 * time.Second))
+		return fn(w, r, d)
+	}
+}
+
+type uploadBody struct {
+	io.ReadCloser
+	ctx context.Context
+}
+
+func (b *uploadBody) Read(p []byte) (int, error) {
+	if err := b.ctx.Err(); err != nil {
+		return 0, err
+	}
+	if b.ReadCloser == nil {
+		return 0, io.EOF
+	}
+	return b.ReadCloser.Read(p)
+}
 
 // drainRequestBody discards what the client already put on the wire for a
 // request the handler answered without reading. net/http only drains 256KiB on
@@ -57,9 +115,13 @@ func keepUploadActive(cache UploadCache, filePath string) func() {
 }
 
 func tusPostHandler(cache UploadCache) handleFunc {
-	return withUser(func(w http.ResponseWriter, r *http.Request, d *data) (int, error) {
+	return withUser(withUploadLock(cache, func(w http.ResponseWriter, r *http.Request, d *data) (int, error) {
 		if !d.user.Perm.Create || !d.Check(r.URL.Path) {
 			return http.StatusForbidden, nil
+		}
+		uploadLength, err := getUploadLength(r)
+		if err != nil || uploadLength < 0 || uploadLength == int64(^uint64(0)>>1) {
+			return http.StatusBadRequest, fmt.Errorf("invalid upload length")
 		}
 
 		file, err := files.NewFileInfo(&files.FileOptions{
@@ -82,7 +144,7 @@ func tusPostHandler(cache UploadCache) handleFunc {
 			return errToStatus(err), err
 		}
 
-		fileFlags := os.O_CREATE | os.O_WRONLY
+		fileFlags := os.O_CREATE | os.O_WRONLY | os.O_EXCL
 
 		// if file exists
 		if file != nil {
@@ -100,11 +162,23 @@ func tusPostHandler(cache UploadCache) handleFunc {
 				return http.StatusForbidden, nil
 			}
 
-			fileFlags |= os.O_TRUNC
+			fileFlags = os.O_WRONLY | os.O_TRUNC
+		}
+		if err := d.RunBeforeHook("upload", r.URL.Path, "", d.user); err != nil {
+			return http.StatusInternalServerError, err
+		}
+		if err := r.Context().Err(); err != nil {
+			return http.StatusRequestTimeout, err
+		}
+		// Confirm the cache accepts the upload before touching existing content.
+		key := uploadKey(d, r.URL.Path)
+		if err := cache.Register(key, uploadLength, nil); err != nil {
+			return http.StatusServiceUnavailable, err
 		}
 
 		openFile, err := d.user.Fs.OpenFile(r.URL.Path, fileFlags, d.settings.FileMode)
 		if err != nil {
+			_ = cache.Complete(key)
 			return errToStatus(err), err
 		}
 		defer openFile.Close()
@@ -119,21 +193,24 @@ func tusPostHandler(cache UploadCache) handleFunc {
 			Content:    false,
 		})
 		if err != nil {
+			_ = cache.Complete(key)
 			return errToStatus(err), err
 		}
 
-		uploadLength, err := getUploadLength(r)
-		if err != nil || uploadLength < 0 {
-			return http.StatusBadRequest, fmt.Errorf("invalid upload length: %w", err)
+		// Keep abandoned partial files in both cache backends. A pathname may
+		// have been replaced since registration, so expiry must not delete it.
+		if err := cache.SetStamp(key, uploadStamp(file)); err != nil {
+			_ = cache.Complete(key)
+			return http.StatusServiceUnavailable, err
 		}
-
-		// Enables the user to utilize the PATCH endpoint for uploading file data.
-		// The removal callback deletes an abandoned upload through the user's
-		// scoped filesystem, so eviction cannot follow a symlink out of scope.
-		uploadPath := r.URL.Path
-		cache.Register(file.RealPath(), uploadLength, func() error {
-			return d.user.Fs.Remove(uploadPath)
-		})
+		if uploadLength == 0 {
+			if err := cache.Complete(key); err != nil {
+				return http.StatusServiceUnavailable, err
+			}
+			if err := d.RunAfterHook("upload", r.URL.Path, "", d.user); err != nil {
+				return http.StatusInternalServerError, err
+			}
+		}
 
 		basePath := "/" + strings.Trim(strings.TrimSpace(d.server.BaseURL), "/")
 		if basePath == "/" {
@@ -142,11 +219,11 @@ func tusPostHandler(cache UploadCache) handleFunc {
 
 		w.Header().Set("Location", basePath+"/api/tus"+r.URL.EscapedPath())
 		return http.StatusCreated, nil
-	})
+	}))
 }
 
 func tusHeadHandler(cache UploadCache) handleFunc {
-	return withUser(func(w http.ResponseWriter, r *http.Request, d *data) (int, error) {
+	return withUser(withUploadLock(cache, func(w http.ResponseWriter, r *http.Request, d *data) (int, error) {
 		w.Header().Set("Cache-Control", "no-store")
 		if !d.user.Perm.Create || !d.Check(r.URL.Path) {
 			return http.StatusForbidden, nil
@@ -164,20 +241,23 @@ func tusHeadHandler(cache UploadCache) handleFunc {
 			return errToStatus(err), err
 		}
 
-		uploadLength, err := cache.GetLength(file.RealPath())
+		uploadLength, err := cache.GetLength(uploadKey(d, r.URL.Path))
 		if err != nil {
 			return http.StatusNotFound, err
+		}
+		if err := validateUploadFile(cache, uploadKey(d, r.URL.Path), file); err != nil {
+			return http.StatusConflict, err
 		}
 
 		w.Header().Set("Upload-Offset", strconv.FormatInt(file.Size, 10))
 		w.Header().Set("Upload-Length", strconv.FormatInt(uploadLength, 10))
 
 		return http.StatusOK, nil
-	})
+	}))
 }
 
 func tusPatchHandler(cache UploadCache) handleFunc {
-	return withUser(func(w http.ResponseWriter, r *http.Request, d *data) (int, error) {
+	return withUser(withUploadLock(cache, func(w http.ResponseWriter, r *http.Request, d *data) (int, error) {
 		status, err := tusPatchUpload(w, r, d, cache)
 		// A rejected chunk is still a chunk the client is streaming: read what is
 		// left of it so the answer reaches the client on a connection that stays
@@ -186,10 +266,10 @@ func tusPatchHandler(cache UploadCache) handleFunc {
 			drainRequestBody(r)
 		}
 		return status, err
-	})
+	}))
 }
 
-func tusPatchUpload(w http.ResponseWriter, r *http.Request, d *data, cache UploadCache) (int, error) {
+func tusPatchUpload(w http.ResponseWriter, r *http.Request, d *data, cache UploadCache) (status int, resultErr error) {
 	if !d.user.Perm.Create || !d.Check(r.URL.Path) {
 		return http.StatusForbidden, nil
 	}
@@ -198,7 +278,7 @@ func tusPatchUpload(w http.ResponseWriter, r *http.Request, d *data, cache Uploa
 	}
 
 	uploadOffset, err := getUploadOffset(r)
-	if err != nil {
+	if err != nil || uploadOffset < 0 {
 		return http.StatusBadRequest, fmt.Errorf("invalid upload offset")
 	}
 
@@ -218,9 +298,13 @@ func tusPatchUpload(w http.ResponseWriter, r *http.Request, d *data, cache Uploa
 		return errToStatus(err), err
 	}
 
-	uploadLength, err := cache.GetLength(file.RealPath())
+	key := uploadKey(d, r.URL.Path)
+	uploadLength, err := cache.GetLength(key)
 	if err != nil {
 		return http.StatusNotFound, err
+	}
+	if err := validateUploadFile(cache, key, file); err != nil {
+		return http.StatusConflict, err
 	}
 
 	if uploadOffset > uploadLength {
@@ -228,7 +312,7 @@ func tusPatchUpload(w http.ResponseWriter, r *http.Request, d *data, cache Uploa
 	}
 
 	// Prevent the upload from being evicted during the transfer
-	stop := keepUploadActive(cache, file.RealPath())
+	stop := keepUploadActive(cache, key)
 	defer stop()
 
 	switch {
@@ -247,6 +331,20 @@ func tusPatchUpload(w http.ResponseWriter, r *http.Request, d *data, cache Uploa
 		return http.StatusInternalServerError, fmt.Errorf("could not open file: %w", err)
 	}
 	defer openFile.Close()
+	cacheActive := true
+	// Refresh the binding even after a short or failed chunk so it can resume.
+	defer func() {
+		if !cacheActive {
+			return
+		}
+		info, err := openFile.Stat()
+		if err == nil {
+			err = cache.SetStamp(key, fmt.Sprintf("%d:%d", info.ModTime().UnixNano(), info.Size()))
+		}
+		if err != nil {
+			status, resultErr = http.StatusServiceUnavailable, err
+		}
+	}()
 
 	_, err = openFile.Seek(uploadOffset, 0)
 	if err != nil {
@@ -286,15 +384,20 @@ func tusPatchUpload(w http.ResponseWriter, r *http.Request, d *data, cache Uploa
 	w.Header().Set("Upload-Offset", strconv.FormatInt(newOffset, 10))
 
 	if newOffset >= uploadLength {
-		cache.Complete(file.RealPath())
-		_ = d.RunHook(func() error { return nil }, "upload", r.URL.Path, "", d.user)
+		if err := cache.Complete(key); err != nil {
+			return http.StatusServiceUnavailable, err
+		}
+		cacheActive = false
+		if err := d.RunAfterHook("upload", r.URL.Path, "", d.user); err != nil {
+			return http.StatusInternalServerError, err
+		}
 	}
 
 	return http.StatusNoContent, nil
 }
 
 func tusDeleteHandler(cache UploadCache) handleFunc {
-	return withUser(func(_ http.ResponseWriter, r *http.Request, d *data) (int, error) {
+	return withUser(withUploadLock(cache, func(_ http.ResponseWriter, r *http.Request, d *data) (int, error) {
 		if r.URL.Path == "/" || !d.user.Perm.Delete {
 			return http.StatusForbidden, nil
 		}
@@ -311,20 +414,28 @@ func tusDeleteHandler(cache UploadCache) handleFunc {
 			return errToStatus(err), err
 		}
 
-		_, err = cache.GetLength(file.RealPath())
+		if file.IsDir {
+			return http.StatusBadRequest, nil
+		}
+		_, err = cache.GetLength(uploadKey(d, r.URL.Path))
 		if err != nil {
 			return http.StatusNotFound, err
 		}
+		if err := validateUploadFile(cache, uploadKey(d, r.URL.Path), file); err != nil {
+			return http.StatusConflict, err
+		}
 
-		err = d.user.Fs.RemoveAll(r.URL.Path)
+		err = d.user.Fs.Remove(r.URL.Path)
 		if err != nil {
 			return errToStatus(err), err
 		}
 
-		cache.Complete(file.RealPath())
+		if err := cache.Complete(uploadKey(d, r.URL.Path)); err != nil {
+			return http.StatusServiceUnavailable, err
+		}
 
 		return http.StatusNoContent, nil
-	})
+	}))
 }
 
 func getUploadLength(r *http.Request) (int64, error) {

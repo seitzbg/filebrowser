@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"time"
 
 	fberrors "github.com/filebrowser/filebrowser/v2/errors"
 	"github.com/filebrowser/filebrowser/v2/files"
@@ -87,7 +89,10 @@ func (a *HookAuth) LoginPage() bool {
 func (a *HookAuth) RunCommand() (string, error) {
 	command := strings.Split(a.Command, " ")
 
-	cmd := exec.Command(command[0], command[1:]...)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
+	cmd.WaitDelay = time.Second
 	cmd.Env = append(os.Environ(), fmt.Sprintf("USERNAME=%s", a.Cred.Username))
 	cmd.Env = append(cmd.Env, fmt.Sprintf("PASSWORD=%s", a.Cred.Password))
 	out, err := cmd.Output()
